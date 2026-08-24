@@ -1,0 +1,5 @@
+{
+  "candidate": "GradientBoostingClassifier",
+  "accuracy": 0.6683366733466933,
+  "severe_misjudge_rate": 0.03206412825651302
+}
