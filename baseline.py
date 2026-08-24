@@ -1,21 +1,43 @@
-"""FINAL · 最简单基线：永远预测训练集里出现最多的星级（多数类）。
+"""多数类基线：总是预测训练集里最常见的 health_star，在测试集上评估。
 
-什么都不学，只记住「最常见的是几星」就猜。中美两个来源分别算。
-用来回答：候选方法是否在同一条件下比这个最笨的基线更有用？
-
-用法：python baseline.py
+与候选模型使用同一份 train/test 划分（同条件比较）。
 """
-from __future__ import annotations
+import json
+import os
 
 import pandas as pd
 from sklearn.metrics import accuracy_score
 
-for name, label in [("us", "美式(完整 Nutri-Score)"), ("cn", "中式(简化 Nutri-Score)")]:
-    y_tr = pd.read_csv(f"data/processed/{name}_train.csv")["health_star"]
-    y_te = pd.read_csv(f"data/processed/{name}_test.csv")["health_star"]
-    majority = int(y_tr.value_counts().idxmax())
-    pred = [majority] * len(y_te)
-    acc = accuracy_score(y_te, pred)
-    print(f"[{label}] 多数类基线：永远预测 {majority} 星")
-    print(f"  测试集准确率: {acc:.4f}  ({int(acc * len(y_te))}/{len(y_te)})")
-    print("  训练集星级分布:", y_tr.value_counts().sort_index().to_dict())
+OUT = os.path.join("data", "processed")
+
+
+def severe_misjudge_rate(y_true, y_pred):
+    """严重误判率：真实<=2 被判>=4，或 真实>=4 被判<=2 的比例。"""
+    n = len(y_true)
+    if n == 0:
+        return 0.0
+    bad = sum(1 for t, p in zip(y_true, y_pred) if (t <= 2 and p >= 4) or (t >= 4 and p <= 2))
+    return bad / n
+
+
+def main():
+    train = pd.read_csv(os.path.join(OUT, "train.csv"))
+    test = pd.read_csv(os.path.join(OUT, "test.csv"))
+
+    majority = int(train["nutri_star"].mode()[0])
+    y_true = test["nutri_star"].tolist()
+    y_pred = [majority] * len(y_true)
+
+    acc = accuracy_score(y_true, y_pred)
+    severe = severe_misjudge_rate(y_true, y_pred)
+    print(f"基线(多数类={majority})  准确率: {acc:.3f}  严重误判率: {severe:.3f}")
+
+    with open("metrics_baseline.json", "w", encoding="utf-8") as f:
+        json.dump({"baseline": "majority class", "majority": majority,
+                   "accuracy": acc, "severe_misjudge_rate": severe},
+                  f, ensure_ascii=False, indent=2)
+    print("已保存 metrics_baseline.json")
+
+
+if __name__ == "__main__":
+    main()

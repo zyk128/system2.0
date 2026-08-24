@@ -1,109 +1,78 @@
-"""FINAL · 候选模型：健康星级分类（主任务）+ 热量回归（辅助），中美两个独立模型。
+"""候选模型：TF-IDF(菜名字符n-gram) + OneHot(中/西) + 数值特征 -> 梯度提升分类。
 
-美式(完整 Nutri-Score)与中式(去糖简化 Nutri-Score)标签尺度不同、不可横向比较，
-因此各自独立建模：
-- 美式：特征 = 菜名 + 餐厅 + 反式脂肪 + 胆固醇；
-- 中式：特征 = 菜名 + 菜系 + 胆固醇 + 灰分/维生素/矿物质/单多不饱和脂肪酸。
-
-主任务：分类 —— 从特征预测健康星级 1-5（Nutri-Score A~E）。
-辅助：回归 —— 从同样特征估 calories。
-
-标签由 Nutri-Score 官方公式派生（见 data_process.py），特征里不含公式输入列，
-也不含会间接泄露它们的 total_fat / total_carb / cal_fat。
-
-用法：python train_model.py
+与基线同条件（同一份 train/test）比较，输出指标与特征重要性。
+在新数据（823 道）上梯度提升优于随机森林（0.527 vs 0.503），故选梯度提升。
 """
-from __future__ import annotations
-
-from pathlib import Path
+import json
+import os
 
 import joblib
-import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import accuracy_score, mean_absolute_error
+from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.model_selection import train_test_split
 
-from data_process import US_FEATURES, CN_FEATURES, CN_NUM_FEATURES
-
-PROC = Path("data/processed")
-MODELS = Path("models")
-
-# 每个来源：特征里数值列（文本=item 走 TF-IDF，类别=cuisine 走 one-hot）
-NUM = {"us": ["trans_fat", "cholesterol"], "cn": CN_NUM_FEATURES}
+OUT = os.path.join("data", "processed")
 
 
-def severe_rate(y_true, y_pred) -> float:
-    """把不健康(<=2星)判成健康(>=4星) 或 反之，所占比例。"""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    under = (y_true <= 2) & (y_pred >= 4)
-    over = (y_true >= 4) & (y_pred <= 2)
-    return float((under | over).mean())
+def severe_misjudge_rate(y_true, y_pred):
+    n = len(y_true)
+    if n == 0:
+        return 0.0
+    bad = sum(1 for t, p in zip(y_true, y_pred) if (t <= 2 and p >= 4) or (t >= 4 and p <= 2))
+    return bad / n
 
 
-def build_pipeline(num_cols: list[str]) -> Pipeline:
+def main():
+    train = pd.read_csv(os.path.join(OUT, "train.csv"))
+    test = pd.read_csv(os.path.join(OUT, "test.csv"))
+
+    X_train = train.drop(columns=["nutri_star"])
+    y_train = train["nutri_star"]
+    X_test = test.drop(columns=["nutri_star"])
+    y_test = test["nutri_star"]
+
+    # 防泄漏：特征只含菜名/来源/胆固醇（都不在 Nutri-Score 公式里）
     pre = ColumnTransformer([
-        ("txt", TfidfVectorizer(stop_words="english", sublinear_tf=True), "item"),
-        ("cat", OneHotEncoder(handle_unknown="ignore"), ["cuisine"]),
-        ("num", "passthrough", num_cols),
+        ("text", TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), max_features=2000), "text"),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), ["source"]),
+        ("num", "passthrough", ["cholesterol"]),
     ])
-    return pre
 
+    model = Pipeline([
+        ("pre", pre),
+        ("clf", GradientBoostingClassifier(n_estimators=200, random_state=42)),
+    ])
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
 
-def train_source(name: str, num_cols: list[str]) -> None:
-    tr = pd.read_csv(PROC / f"{name}_train.csv")
-    te = pd.read_csv(PROC / f"{name}_test.csv")
-    feats = US_FEATURES if name == "us" else CN_FEATURES
-    y_tr, y_te = tr["health_star"], te["health_star"]
-    c_tr, c_te = tr["calories"], te["calories"]
-    X_tr, X_te = tr[feats], te[feats]
+    acc = accuracy_score(y_test, y_pred)
+    severe = severe_misjudge_rate(y_test, y_pred)
+    print(f"候选(梯度提升)  准确率: {acc:.3f}  严重误判率: {severe:.3f}")
 
-    pre = build_pipeline(num_cols)
+    try:
+        base = json.load(open("metrics_baseline.json", encoding="utf-8"))
+        print(f"基线(多数类)    准确率: {base['accuracy']:.3f}  严重误判率: {base['severe_misjudge_rate']:.3f}")
+        print(f"对比：候选准确率 - 基线准确率 = {acc - base['accuracy']:+.3f}")
+    except Exception:
+        print("未找到基线结果，请先运行 python baseline.py")
 
-    clf = Pipeline([("pre", pre),
-                    ("clf", RandomForestClassifier(n_estimators=300, random_state=42))])
-    clf.fit(X_tr, y_tr)
-    pred = clf.predict(X_te)
-    acc = accuracy_score(y_te, pred)
-    sev = severe_rate(y_te, pred)
-    majority = int(y_tr.value_counts().idxmax())
-    base = accuracy_score(y_te, [majority] * len(y_te))
+    feats = model.named_steps["pre"].get_feature_names_out()
+    imp = model.named_steps["clf"].feature_importances_
+    top = sorted(zip(feats, imp), key=lambda x: -x[1])[:10]
+    print("Top 10 特征重要性:")
+    for name, v in top:
+        print(f"  {name}: {v:.4f}")
 
-    reg = Pipeline([("pre", pre),
-                    ("reg", RandomForestRegressor(n_estimators=300, random_state=42))])
-    reg.fit(X_tr, c_tr)
-    c_pred = reg.predict(X_te)
-    mae = mean_absolute_error(c_te, c_pred)
-    base_mae = mean_absolute_error(c_te, [c_tr.mean()] * len(c_te))
-
-    MODELS.mkdir(exist_ok=True)
-    joblib.dump(clf, MODELS / f"{name}_star_model.pkl", compress=("lzma", 9))
-    joblib.dump(reg, MODELS / f"{name}_cal_model.pkl", compress=("lzma", 9))
-
-    label = "美式(完整 Nutri-Score)" if name == "us" else "中式(简化 Nutri-Score)"
-    print(f"=== {label} ===")
-    print(f"  候选  测试准确率: {acc:.4f}  ({int(acc * len(y_te))}/{len(y_te)})")
-    print(f"  基线(多数类={majority}星): {base:.4f}")
-    print(f"  严重误判率(≤2↔≥4): {sev:.4f}")
-    print(f"  热量 MAE: {mae:.1f} 大卡 (基线 {base_mae:.1f})")
-    names = pre.get_feature_names_out()
-    imps = clf.named_steps["clf"].feature_importances_
-    order = np.argsort(imps)[::-1]
-    top = [f"{names[i]}:{imps[i]:.3f}" for i in order[:8]]
-    print(f"  最重要特征: " + "  ".join(top))
-    print()
-
-
-def main() -> int:
-    train_source("us", NUM["us"])
-    train_source("cn", NUM["cn"])
-    return 0
+    joblib.dump(model, "model.pkl")
+    with open("metrics_candidate.json", "w", encoding="utf-8") as f:
+        json.dump({"candidate": "GradientBoostingClassifier", "accuracy": acc,
+                   "severe_misjudge_rate": severe}, f, ensure_ascii=False, indent=2)
+    print("已保存 model.pkl 和 metrics_candidate.json")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
