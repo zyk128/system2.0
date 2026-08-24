@@ -1,0 +1,6 @@
+{
+  "baseline": "majority class",
+  "majority": 1,
+  "accuracy": 0.5420841683366734,
+  "severe_misjudge_rate": 0.04208416833667335
+}
