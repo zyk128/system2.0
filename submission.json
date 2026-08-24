@@ -1,0 +1,14 @@
+{
+  "milestone": "final-project",
+  "team": "刘语桐",
+  "members": [
+    "刘语桐"
+  ],
+  "repository_url": "填写 GitHub 仓库 URL（建库后回填）",
+  "run_command": "python data_process.py --check-data && python data_process.py && python train_model.py",
+  "test_command": "python -m unittest discover -s tests -v",
+  "report": "report.md",
+  "presentation": "presentation.pptx",
+  "presentation_minutes": 10,
+  "student_confirmed_no_secrets": true
+}
